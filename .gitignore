@@ -1,0 +1,35 @@
+# Runtime state
+.cache/
+**/labwc-niri/
+
+# Nix build artifacts
+result
+result-*
+
+# Go build artifacts
+/intentile
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+
+# Editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Claude commits
+commits/
+
+# Documentation (only track root-level README, CLAUDE.md, and TASKBOARD)
+*.md
+!/README.md
+!/CLAUDE.md
+!/TASKBOARD.md

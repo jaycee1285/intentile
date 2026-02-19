@@ -1,0 +1,757 @@
+#!/usr/bin/env sh
+set -eu
+
+STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/labwc-niri"
+STATE_WS="$STATE_DIR/current_ws"
+STATE_ARM_WS="$STATE_DIR/arm_ws"
+STATE_ARM_TS="$STATE_DIR/arm_ts"
+STATE_SHAPE="$STATE_DIR/shape"
+STATE_SHAPE_TS="$STATE_DIR/shape_ts"
+RC_XML="${LABWC_NIRI_RC_XML:-${XDG_CONFIG_HOME:-$HOME/.config}/labwc/rc.xml}"
+SPAWN_DELAY="${LABWC_NIRI_SPAWN_DELAY:-0.20}"
+ARM_TTL_MS="${LABWC_NIRI_ARM_TTL_MS:-900}"
+SHAPE_TTL_MS="${LABWC_NIRI_SHAPE_TTL_MS:-1400}"
+SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf '%s' "$0")"
+
+KEY_HALF_LEFT="${LABWC_NIRI_KEY_HALF_LEFT:-super+ctrl+h}"
+KEY_HALF_RIGHT="${LABWC_NIRI_KEY_HALF_RIGHT:-super+ctrl+l}"
+KEY_THIRD_LEFT="${LABWC_NIRI_KEY_THIRD_LEFT:-super+ctrl+j}"
+KEY_THIRD_MID="${LABWC_NIRI_KEY_THIRD_MID:-super+ctrl+k}"
+KEY_THIRD_RIGHT="${LABWC_NIRI_KEY_THIRD_RIGHT:-super+ctrl+semicolon}"
+KEY_QUARTER_UL="${LABWC_NIRI_KEY_QUARTER_UL:-super+ctrl+u}"
+KEY_QUARTER_UR="${LABWC_NIRI_KEY_QUARTER_UR:-super+ctrl+i}"
+KEY_QUARTER_LL="${LABWC_NIRI_KEY_QUARTER_LL:-super+ctrl+o}"
+KEY_QUARTER_LR="${LABWC_NIRI_KEY_QUARTER_LR:-super+ctrl+p}"
+KEY_WS_NEXT="${LABWC_NIRI_KEY_WS_NEXT:-super+ctrl+Right}"
+KEY_WS_PREV="${LABWC_NIRI_KEY_WS_PREV:-super+ctrl+Left}"
+KEY_MOVE_NEXT="${LABWC_NIRI_KEY_MOVE_NEXT:-super+ctrl+shift+Right}"
+KEY_MOVE_PREV="${LABWC_NIRI_KEY_MOVE_PREV:-super+ctrl+shift+Left}"
+KEY_NEXT_WINDOW="${LABWC_NIRI_KEY_NEXT_WINDOW:-alt+Tab}"
+DEBUG_NOTIFY="${LABWC_NIRI_DEBUG_NOTIFY:-0}"
+
+ensure_state() {
+  mkdir -p "$STATE_DIR"
+  if [ ! -f "$STATE_WS" ]; then
+    printf "%s\n" "${LABWC_NIRI_START_WS:-1}" > "$STATE_WS"
+  fi
+}
+
+get_desktops_number() {
+  if [ ! -f "$RC_XML" ]; then
+    return 1
+  fi
+  sed -nE 's/.*<desktops[^>]*number="([0-9]+)".*/\1/p' "$RC_XML" | head -n1
+}
+
+set_desktops_number() {
+  new="$1"
+  tmp="$(mktemp)"
+  NEW="$new" perl -0777 -pe 's/(<desktops[^>]*\bnumber=")\d+("[^>]*>)/$1.$ENV{NEW}.$2/se' "$RC_XML" > "$tmp"
+  mv "$tmp" "$RC_XML"
+}
+
+names_indent() {
+  perl -0777 -ne 'if (/<names>(.*?)<\/names>/s){$blk=$1; if($blk =~ /(\n[ \t]*)<name>.*?<\/name>(?!.*<name>)/s){print $1}else{print "\n  ";}}' "$RC_XML"
+}
+
+append_name() {
+  new="$1"
+  indent="$(names_indent)"
+  if [ -z "$indent" ]; then
+    indent=$'\n  '
+  fi
+  tmp="$(mktemp)"
+  INDENT="$indent" NAME="$new" perl -0777 -pe 's{(<names>.*?)(</names>)}{$1.$ENV{INDENT}."<name>$ENV{NAME}</name>".$2}se' "$RC_XML" > "$tmp"
+  mv "$tmp" "$RC_XML"
+}
+
+remove_last_name() {
+  tmp="$(mktemp)"
+  perl -0777 -pe 's{(<names>.*)(\n[ \t]*<name>.*?<\/name>)(\s*</names>)}{$1$3}s' "$RC_XML" > "$tmp"
+  mv "$tmp" "$RC_XML"
+}
+
+reconfigure_labwc() {
+  if command -v labwc >/dev/null 2>&1; then
+    labwc -r >/dev/null 2>&1 || {
+      echo "labwc-niri: labwc -r failed" >&2
+      exit 1
+    }
+  else
+    echo "labwc-niri: labwc not found in PATH" >&2
+    exit 1
+  fi
+}
+
+maybe_reconfigure() {
+  if [ "${LABWC_NIRI_SKIP_RECONFIGURE:-0}" = "1" ]; then
+    return 0
+  fi
+  reconfigure_labwc
+}
+
+escape_squotes() {
+  printf "%s" "$1" | sed "s/'/'\"'\"'/g"
+}
+
+shell_cmd() {
+  esc="$(escape_squotes "$1")"
+  printf "sh -lc '%s'" "$esc"
+}
+
+xml_escape() {
+  printf "%s" "$1" | sed \
+    -e 's/&/\&amp;/g' \
+    -e 's/</\&lt;/g' \
+    -e 's/>/\&gt;/g' \
+    -e 's/\"/\&quot;/g' \
+    -e "s/'/\&apos;/g"
+}
+
+insert_keybind() {
+  key="$1"
+  cmd="$2"
+  tmp="$(mktemp)"
+  cmd_shell="$(shell_cmd "$cmd")"
+  cmd_xml="$(xml_escape "$cmd_shell")"
+  block="$(printf '\n  <keybind key="%s">\n    <action name="Execute" command="%s" />\n  </keybind>\n' "$key" "$cmd_xml")"
+  BLOCK="$block" perl -0777 -pe 's{</keyboard>}{$ENV{BLOCK}</keyboard>}s' "$RC_XML" > "$tmp"
+  mv "$tmp" "$RC_XML"
+}
+
+ensure_ws_keybinds() {
+  if [ ! -f "$RC_XML" ]; then
+    echo "labwc-niri: rc.xml not found at $RC_XML" >&2
+    exit 1
+  fi
+  if ! grep -q "<keyboard" "$RC_XML"; then
+    echo "labwc-niri: <keyboard> section not found in $RC_XML" >&2
+    exit 1
+  fi
+
+  changed=0
+  ws_add_cmd="$SCRIPT_PATH ws add"
+  ws_rm_cmd="$SCRIPT_PATH ws rm"
+  ws_add_shell="$(shell_cmd "$ws_add_cmd")"
+  ws_rm_shell="$(shell_cmd "$ws_rm_cmd")"
+  ws_add_shell_xml="$(xml_escape "$ws_add_shell")"
+  ws_rm_shell_xml="$(xml_escape "$ws_rm_shell")"
+
+  if grep -q 'command="labwc-niri ws add"' "$RC_XML" || grep -q 'command="labwc-niri ws rm"' "$RC_XML"; then
+    tmp="$(mktemp)"
+    WS_ADD_CMD="$ws_add_cmd" WS_RM_CMD="$ws_rm_cmd" perl -0777 -pe 's/command="labwc-niri ws add"/command="$ENV{WS_ADD_CMD}"/g; s/command="labwc-niri ws rm"/command="$ENV{WS_RM_CMD}"/g' "$RC_XML" > "$tmp"
+    mv "$tmp" "$RC_XML"
+    changed=1
+  fi
+
+  if grep -q 'labwc-niri ws add' "$RC_XML" || grep -q 'labwc-niri ws rm' "$RC_XML"; then
+    tmp="$(mktemp)"
+    WS_ADD_CMD="$ws_add_cmd" WS_RM_CMD="$ws_rm_cmd" WS_ADD_SHELL="$ws_add_shell_xml" WS_RM_SHELL="$ws_rm_shell_xml" perl -0777 -pe 's{command="[^"]*\\Q$ENV{WS_ADD_CMD}\\E[^"]*"}{command="$ENV{WS_ADD_SHELL}"}g; s{command="[^"]*\\Q$ENV{WS_RM_CMD}\\E[^"]*"}{command="$ENV{WS_RM_SHELL}"}g; s{<command>[^<]*\\Q$ENV{WS_ADD_CMD}\\E[^<]*</command>}{<command>$ENV{WS_ADD_SHELL}</command>}g; s{<command>[^<]*\\Q$ENV{WS_RM_CMD}\\E[^<]*</command>}{<command>$ENV{WS_RM_SHELL}</command>}g' "$RC_XML" > "$tmp"
+    mv "$tmp" "$RC_XML"
+    changed=1
+  fi
+
+  if ! grep -q 'command="labwc-niri ws add"' "$RC_XML" && ! grep -q "command=\"$ws_add_cmd\"" "$RC_XML" && ! grep -q "command=\"$ws_add_shell\"" "$RC_XML" && ! grep -q "command=\"$ws_add_shell_xml\"" "$RC_XML"; then
+    if grep -q 'key="A-w"' "$RC_XML"; then
+      echo "labwc-niri: keybind A-w already exists; skipping insert" >&2
+    else
+      insert_keybind "A-w" "$ws_add_cmd"
+      changed=1
+    fi
+  fi
+
+  if ! grep -q 'command="labwc-niri ws rm"' "$RC_XML" && ! grep -q "command=\"$ws_rm_cmd\"" "$RC_XML" && ! grep -q "command=\"$ws_rm_shell\"" "$RC_XML" && ! grep -q "command=\"$ws_rm_shell_xml\"" "$RC_XML"; then
+    if grep -q 'key="A-S-w"' "$RC_XML"; then
+      echo "labwc-niri: keybind A-S-w already exists; skipping insert" >&2
+    else
+      insert_keybind "A-S-w" "$ws_rm_cmd"
+      changed=1
+    fi
+  fi
+
+  if [ "$changed" -eq 1 ]; then
+    maybe_reconfigure
+  fi
+}
+
+add_workspace() {
+  maybe_notify "ws add"
+  if [ ! -f "$RC_XML" ]; then
+    echo "labwc-niri: rc.xml not found at $RC_XML" >&2
+    exit 1
+  fi
+
+  current="$(get_desktops_number || true)"
+  if [ -z "$current" ]; then
+    echo "labwc-niri: could not find <desktops number=...> in $RC_XML" >&2
+    exit 1
+  fi
+
+  next=$((current + 1))
+  set_desktops_number "$next"
+  if grep -q "<names>" "$RC_XML"; then
+    append_name "$next"
+  fi
+
+  MAX_WS="$next"
+  maybe_reconfigure
+}
+
+remove_workspace() {
+  maybe_notify "ws rm"
+  if [ ! -f "$RC_XML" ]; then
+    echo "labwc-niri: rc.xml not found at $RC_XML" >&2
+    exit 1
+  fi
+
+  current="$(get_desktops_number || true)"
+  if [ -z "$current" ]; then
+    echo "labwc-niri: could not find <desktops number=...> in $RC_XML" >&2
+    exit 1
+  fi
+
+  if [ "$current" -le 1 ]; then
+    echo "labwc-niri: cannot reduce workspaces below 1" >&2
+    exit 1
+  fi
+
+  next=$((current - 1))
+  set_desktops_number "$next"
+  if grep -q "<names>" "$RC_XML"; then
+    remove_last_name
+  fi
+
+  if [ "$(get_ws)" -gt "$next" ]; then
+    set_ws "$next"
+  fi
+  rm -f "$STATE_DIR/ws-$current"
+
+  MAX_WS="$next"
+  maybe_reconfigure
+}
+
+get_ws() {
+  cat "$STATE_WS"
+}
+
+set_ws() {
+  printf "%s\n" "$1" > "$STATE_WS"
+}
+
+count_file() {
+  printf "%s/ws-%s" "$STATE_DIR" "$1"
+}
+
+get_count() {
+  file="$(count_file "$1")"
+  if [ -f "$file" ]; then
+    cat "$file"
+  else
+    printf "0\n"
+  fi
+}
+
+set_count() {
+  file="$(count_file "$1")"
+  printf "%s\n" "$2" > "$file"
+}
+
+state_read() {
+  file="$1"
+  if [ -f "$file" ]; then
+    cat "$file"
+  fi
+}
+
+state_write() {
+  file="$1"
+  value="$2"
+  printf "%s\n" "$value" > "$file"
+}
+
+state_clear() {
+  file="$1"
+  rm -f "$file"
+}
+
+now_ms() {
+  date +%s%3N
+}
+
+is_fresh() {
+  ts="$1"
+  ttl="$2"
+  if [ -z "$ts" ]; then
+    return 1
+  fi
+  now="$(now_ms)"
+  age=$((now - ts))
+  [ "$age" -ge 0 ] && [ "$age" -le "$ttl" ]
+}
+
+next_ws() {
+  ws="$1"
+  printf "%s\n" $((ws % MAX_WS + 1))
+}
+
+prev_ws() {
+  ws="$1"
+  p=$((ws - 1))
+  if [ "$p" -lt 1 ]; then
+    p="$MAX_WS"
+  fi
+  printf "%s\n" "$p"
+}
+
+resolve_target_ws() {
+  target="$1"
+  ws="$(get_ws)"
+  case "$target" in
+    here|current)
+      printf "%s\n" "$ws"
+      ;;
+    next|right)
+      next_ws "$ws"
+      ;;
+    prev|left)
+      prev_ws "$ws"
+      ;;
+    *)
+      case "$target" in
+        ''|*[!0-9]*)
+          return 1
+          ;;
+      esac
+      if [ "$target" -lt 1 ] || [ "$target" -gt "$MAX_WS" ]; then
+        return 1
+      fi
+      printf "%s\n" "$target"
+      ;;
+  esac
+}
+
+arm_target() {
+  target="$1"
+  ws="$(resolve_target_ws "$target" || true)"
+  if [ -z "$ws" ]; then
+    echo "labwc-niri: invalid arm target '$target'" >&2
+    exit 1
+  fi
+  state_write "$STATE_ARM_WS" "$ws"
+  state_write "$STATE_ARM_TS" "$(now_ms)"
+  maybe_notify "ARM ws:$ws"
+}
+
+clear_arm() {
+  state_clear "$STATE_ARM_WS"
+  state_clear "$STATE_ARM_TS"
+}
+
+set_shape() {
+  shape="$1"
+  case "$shape" in
+    2|3|4) ;;
+    *)
+      echo "labwc-niri: invalid shape '$shape' (expected 2|3|4)" >&2
+      exit 1
+      ;;
+  esac
+  state_write "$STATE_SHAPE" "$shape"
+  state_write "$STATE_SHAPE_TS" "$(now_ms)"
+  maybe_notify "SHAPE $shape"
+}
+
+clear_shape() {
+  state_clear "$STATE_SHAPE"
+  state_clear "$STATE_SHAPE_TS"
+}
+
+clear_intent() {
+  clear_arm
+  clear_shape
+}
+
+active_armed_ws() {
+  aws="$(state_read "$STATE_ARM_WS")"
+  ats="$(state_read "$STATE_ARM_TS")"
+  if is_fresh "$ats" "$ARM_TTL_MS" && [ -n "$aws" ]; then
+    printf "%s\n" "$aws"
+  fi
+}
+
+active_shape() {
+  shp="$(state_read "$STATE_SHAPE")"
+  sts="$(state_read "$STATE_SHAPE_TS")"
+  if is_fresh "$sts" "$SHAPE_TTL_MS" && [ -n "$shp" ]; then
+    printf "%s\n" "$shp"
+  fi
+}
+
+normalize_slot() {
+  shape="$1"
+  token="$(printf "%s" "$2" | tr '[:upper:]' '[:lower:]')"
+  case "$shape" in
+    2)
+      case "$token" in
+        j|left) printf "l\n" ;;
+        l|r|right) printf "r\n" ;;
+        *) return 1 ;;
+      esac
+      ;;
+    3)
+      case "$token" in
+        j|left) printf "l\n" ;;
+        k|m|mid|middle) printf "m\n" ;;
+        l|';'|r|right) printf "r\n" ;;
+        *) return 1 ;;
+      esac
+      ;;
+    4)
+      case "$token" in
+        ul|ij|tl) printf "ul\n" ;;
+        ur|il|tr) printf "ur\n" ;;
+        ll|kj|bl) printf "ll\n" ;;
+        lr|kl|br) printf "lr\n" ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+snap_shape_slot() {
+  shape="$1"
+  slot="$2"
+  case "$shape:$slot" in
+    2:l) send_key "$KEY_HALF_LEFT" ;;
+    2:r) send_key "$KEY_HALF_RIGHT" ;;
+    3:l) send_key "$KEY_THIRD_LEFT" ;;
+    3:m) send_key "$KEY_THIRD_MID" ;;
+    3:r) send_key "$KEY_THIRD_RIGHT" ;;
+    4:ul) send_key "$KEY_QUARTER_UL" ;;
+    4:ur) send_key "$KEY_QUARTER_UR" ;;
+    4:ll) send_key "$KEY_QUARTER_LL" ;;
+    4:lr) send_key "$KEY_QUARTER_LR" ;;
+    *)
+      echo "labwc-niri: unsupported placement '$shape$slot'" >&2
+      exit 1
+      ;;
+  esac
+}
+
+move_window_to_ws() {
+  target="$1"
+  ws="$(get_ws)"
+  if [ "$target" -eq "$ws" ]; then
+    return 0
+  fi
+
+  forward=$((target - ws))
+  if [ "$forward" -lt 0 ]; then
+    forward=$((forward + MAX_WS))
+  fi
+  backward=$((MAX_WS - forward))
+
+  if [ "$forward" -le "$backward" ]; then
+    steps="$forward"
+    key="$KEY_MOVE_NEXT"
+    dir="next"
+  else
+    steps="$backward"
+    key="$KEY_MOVE_PREV"
+    dir="prev"
+  fi
+
+  i=0
+  while [ "$i" -lt "$steps" ]; do
+    send_key "$key"
+    sleep 0.05
+    if [ "$dir" = "next" ]; then
+      ws="$(next_ws "$ws")"
+    else
+      ws="$(prev_ws "$ws")"
+    fi
+    set_ws "$ws"
+    i=$((i + 1))
+  done
+}
+
+place_slot() {
+  token="$1"
+  shape="$(active_shape || true)"
+  if [ -z "$shape" ]; then
+    echo "labwc-niri: no active shape (run 'shape 2|3|4' first)" >&2
+    exit 1
+  fi
+
+  slot="$(normalize_slot "$shape" "$token" || true)"
+  if [ -z "$slot" ]; then
+    echo "labwc-niri: invalid slot '$token' for shape '$shape'" >&2
+    exit 1
+  fi
+
+  target_ws="$(active_armed_ws || true)"
+  if [ -z "$target_ws" ]; then
+    target_ws="$(get_ws)"
+  fi
+
+  move_window_to_ws "$target_ws"
+  snap_shape_slot "$shape" "$slot"
+
+  # Bump approximate occupancy count on target workspace.
+  set_count "$target_ws" $(( $(get_count "$target_ws") + 1 ))
+
+  clear_intent
+}
+
+place_spec() {
+  target="$1"
+  spec="$(printf "%s" "$2" | tr '[:upper:]' '[:lower:]')"
+  case "$spec" in
+    2*|3*|4*) ;;
+    *)
+      echo "labwc-niri: invalid placement spec '$spec' (examples: 2l,3m,4lr)" >&2
+      exit 1
+      ;;
+  esac
+  shape="${spec%${spec#?}}"
+  slot="${spec#?}"
+  if [ -z "$slot" ]; then
+    echo "labwc-niri: missing slot in '$spec' (examples: 2l,3m,4lr)" >&2
+    exit 1
+  fi
+  arm_target "$target"
+  set_shape "$shape"
+  place_slot "$slot"
+}
+
+send_key() {
+  chord="$1"
+  key="${chord##*+}"
+  mods="${chord%+$key}"
+  if [ "$mods" = "$key" ]; then
+    wtype -k "$key"
+    return 0
+  fi
+
+  args=""
+  mods_list=$(printf "%s" "$mods" | tr '+' ' ')
+  for m in $mods_list; do
+    args="$args -M $m"
+  done
+  args="$args -k $key"
+  for m in $mods_list; do
+    args="$args -m $m"
+  done
+
+  # shellcheck disable=SC2086
+  wtype $args
+}
+
+retile_three() {
+  send_key "$KEY_THIRD_RIGHT"
+  sleep 0.05
+  send_key "$KEY_NEXT_WINDOW"
+  sleep 0.05
+  send_key "$KEY_THIRD_MID"
+  sleep 0.05
+  send_key "$KEY_NEXT_WINDOW"
+  sleep 0.05
+  send_key "$KEY_THIRD_LEFT"
+}
+
+usage() {
+  cat <<USAGE
+Usage:
+  labwc-niri launch <command...>
+  labwc-niri sync <index>
+  labwc-niri ws next|prev|add|rm
+  labwc-niri move next|prev
+  labwc-niri arm next|prev|here|<ws-index>
+  labwc-niri shape 2|3|4
+  labwc-niri slot <token>                      # 2:j/l  3:j/k/l  4:ij|il|kj|kl
+  labwc-niri place <next|prev|here|ws-index> <2j|2l|3j|3k|3l|4ij|4il|4kj|4kl>
+  labwc-niri clear
+  labwc-niri reset
+USAGE
+}
+
+need_wtype() {
+  if ! command -v wtype >/dev/null 2>&1; then
+    echo "labwc-niri: wtype not found in PATH" >&2
+    exit 1
+  fi
+}
+
+maybe_notify() {
+  if [ "$DEBUG_NOTIFY" = "1" ] && command -v notify-send >/dev/null 2>&1; then
+    notify-send -a labwc-niri "$1"
+  fi
+}
+
+ensure_state
+
+ensure_ws_keybinds
+
+MAX_WS="$(get_desktops_number || true)"
+if [ -z "$MAX_WS" ]; then
+  MAX_WS="${LABWC_NIRI_MAX_WS:-12}"
+fi
+
+if [ "$#" -eq 0 ]; then
+  usage
+  exit 0
+fi
+
+cmd="$1"
+shift
+
+case "$cmd" in
+  launch)
+    need_wtype
+    if [ "$#" -eq 0 ]; then
+      usage
+      exit 1
+    fi
+    ws="$(get_ws)"
+    count="$(get_count "$ws")"
+    count=$((count + 1))
+    set_count "$ws" "$count"
+
+    "$@" &
+
+    sleep "$SPAWN_DELAY"
+
+    if [ "$count" -eq 1 ]; then
+      send_key "$KEY_HALF_LEFT"
+    elif [ "$count" -eq 2 ]; then
+      send_key "$KEY_HALF_RIGHT"
+    elif [ "$count" -eq 3 ]; then
+      retile_three
+    else
+      next=$((ws % MAX_WS + 1))
+      set_ws "$next"
+      set_count "$next" 1
+      send_key "$KEY_MOVE_NEXT"
+      sleep 0.05
+      send_key "$KEY_HALF_LEFT"
+    fi
+    ;;
+  sync)
+    idx="${1:-}"
+    if [ -z "$idx" ]; then
+      usage
+      exit 1
+    fi
+    set_ws "$idx"
+    ;;
+  ws)
+    dir="${1:-}"
+    case "$dir" in
+      next)
+        need_wtype
+        ws="$(get_ws)"
+        next=$((ws % MAX_WS + 1))
+        set_ws "$next"
+        send_key "$KEY_WS_NEXT"
+        ;;
+      prev)
+        need_wtype
+        ws="$(get_ws)"
+        prev=$((ws - 1))
+        if [ "$prev" -lt 1 ]; then
+          prev="$MAX_WS"
+        fi
+        set_ws "$prev"
+        send_key "$KEY_WS_PREV"
+        ;;
+      add)
+        add_workspace
+        ;;
+      rm|remove)
+        remove_workspace
+        ;;
+      *)
+        usage
+        exit 1
+        ;;
+    esac
+    ;;
+  move)
+    dir="${1:-}"
+    case "$dir" in
+      next)
+        need_wtype
+        ws="$(get_ws)"
+        next=$((ws % MAX_WS + 1))
+        set_ws "$next"
+        set_count "$next" $(( $(get_count "$next") + 1 ))
+        send_key "$KEY_MOVE_NEXT"
+        ;;
+      prev)
+        need_wtype
+        ws="$(get_ws)"
+        prev=$((ws - 1))
+        if [ "$prev" -lt 1 ]; then
+          prev="$MAX_WS"
+        fi
+        set_ws "$prev"
+        set_count "$prev" $(( $(get_count "$prev") + 1 ))
+        send_key "$KEY_MOVE_PREV"
+        ;;
+      *)
+        usage
+        exit 1
+        ;;
+    esac
+    ;;
+  arm)
+    target="${1:-}"
+    if [ -z "$target" ]; then
+      usage
+      exit 1
+    fi
+    arm_target "$target"
+    ;;
+  shape)
+    shape="${1:-}"
+    if [ -z "$shape" ]; then
+      usage
+      exit 1
+    fi
+    set_shape "$shape"
+    ;;
+  slot)
+    need_wtype
+    token="${1:-}"
+    if [ -z "$token" ]; then
+      usage
+      exit 1
+    fi
+    place_slot "$token"
+    ;;
+  place)
+    need_wtype
+    target="${1:-}"
+    spec="${2:-}"
+    if [ -z "$target" ] || [ -z "$spec" ]; then
+      usage
+      exit 1
+    fi
+    place_spec "$target" "$spec"
+    ;;
+  clear)
+    clear_intent
+    ;;
+  reset)
+    rm -f "$STATE_DIR"/ws-*
+    printf "%s\n" "${LABWC_NIRI_START_WS:-1}" > "$STATE_WS"
+    clear_intent
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
