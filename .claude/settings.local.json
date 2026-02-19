@@ -22,7 +22,10 @@
       "Bash(git reset:*)",
       "Bash(git commit:*)",
       "Bash(./intentile version:*)",
-      "Bash(./intentile help:*)"
+      "Bash(./intentile help:*)",
+      "Bash(INTENTILE_DEBUG=1 ./intentile arm:*)",
+      "Bash(INTENTILE_DEBUG=1 ./intentile slot:*)",
+      "Bash(INTENTILE_DEBUG=1 ./intentile:*)"
     ]
   }
 }
