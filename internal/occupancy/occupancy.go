@@ -148,6 +148,27 @@ func (t *Tracker) GetState(wsIndex int) *Workspace {
 	return copy
 }
 
+// GetAllWorkspaces returns a map of all workspaces (for status/debugging)
+func (t *Tracker) GetAllWorkspaces() map[int]*Workspace {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	// Return a deep copy to avoid race conditions
+	result := make(map[int]*Workspace)
+	for idx, ws := range t.workspaces {
+		copy := &Workspace{
+			Index:         ws.Index,
+			Shape:         ws.Shape,
+			OccupiedSlots: make(map[int]bool),
+		}
+		for slot := range ws.OccupiedSlots {
+			copy.OccupiedSlots[slot] = true
+		}
+		result[idx] = copy
+	}
+	return result
+}
+
 func getMaxSlots(shape int) int {
 	switch shape {
 	case 2:

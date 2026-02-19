@@ -25,7 +25,11 @@
       "Bash(./intentile help:*)",
       "Bash(INTENTILE_DEBUG=1 ./intentile arm:*)",
       "Bash(INTENTILE_DEBUG=1 ./intentile slot:*)",
-      "Bash(INTENTILE_DEBUG=1 ./intentile:*)"
+      "Bash(INTENTILE_DEBUG=1 ./intentile:*)",
+      "Bash(./intentile status:*)",
+      "Bash(./intentile arm:*)",
+      "Bash(./intentile slot:*)",
+      "Bash(./intentile:*)"
     ]
   }
 }

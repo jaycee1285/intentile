@@ -6,31 +6,28 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/jaycee1285/intentile/internal/client"
 	"github.com/jaycee1285/intentile/internal/daemon"
 )
 
 const version = "0.1.0"
 
-var daemonInstance *daemon.Daemon
-
 func main() {
-	// Initialize daemon (in-memory for now, later can be socket-based)
-	daemonInstance = daemon.NewDaemon(daemon.Config{
-		Debug: os.Getenv("INTENTILE_DEBUG") == "1",
-	})
-
-	ctx := context.Background()
-	if err := daemonInstance.Start(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "intentile: failed to start: %v\n", err)
-		os.Exit(1)
-	}
-
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(0)
 	}
 
 	cmd := os.Args[1]
+
+	// Daemon mode - run as server
+	if cmd == "daemon" {
+		runDaemon()
+		return
+	}
+
+	// Client mode - send commands to daemon
+	c := client.NewClient()
 
 	var err error
 	switch cmd {
@@ -39,17 +36,29 @@ func main() {
 	case "help":
 		printUsage()
 	case "arm":
-		err = handleArm()
+		err = handleArm(c)
 	case "slot":
-		err = handleSlot()
+		err = handleSlot(c)
 	case "place":
-		err = handlePlace()
+		err = handlePlace(c)
 	case "clear":
-		err = daemonInstance.Clear()
+		err = c.Clear()
+	case "status":
+		status, statusErr := c.Status()
+		if statusErr != nil {
+			err = statusErr
+		} else {
+			fmt.Println(status)
+		}
+	case "stop":
+		err = c.Stop()
+		if err == nil {
+			fmt.Println("daemon stopped")
+		}
 	default:
 		// Try parsing as atomic slot number (1-9)
 		if num, parseErr := strconv.Atoi(cmd); parseErr == nil && num >= 1 && num <= 9 {
-			err = daemonInstance.PlaceAtomic(num)
+			err = c.PlaceAtomic(num)
 		} else {
 			fmt.Fprintf(os.Stderr, "intentile: unknown command '%s'\n", cmd)
 			printUsage()
@@ -63,7 +72,25 @@ func main() {
 	}
 }
 
-func handleArm() error {
+func runDaemon() {
+	d := daemon.NewDaemon(daemon.Config{
+		Debug: os.Getenv("INTENTILE_DEBUG") == "1",
+	})
+
+	server, err := daemon.NewServer(d)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "intentile: failed to create server: %v\n", err)
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+	if err := server.Start(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "intentile: daemon error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func handleArm(c *client.Client) error {
 	if len(os.Args) < 4 {
 		return fmt.Errorf("usage: intentile arm <target> <shape>")
 	}
@@ -72,18 +99,18 @@ func handleArm() error {
 	if err != nil || (shape != 2 && shape != 3 && shape != 4) {
 		return fmt.Errorf("invalid shape '%s' (expected 2, 3, or 4)", os.Args[3])
 	}
-	return daemonInstance.Arm(target, shape)
+	return c.Arm(target, shape)
 }
 
-func handleSlot() error {
+func handleSlot(c *client.Client) error {
 	if len(os.Args) < 3 {
 		return fmt.Errorf("usage: intentile slot <token>")
 	}
 	token := os.Args[2]
-	return daemonInstance.Slot(token)
+	return c.Slot(token)
 }
 
-func handlePlace() error {
+func handlePlace(c *client.Client) error {
 	if len(os.Args) < 4 {
 		return fmt.Errorf("usage: intentile place <target> <spec>")
 	}
@@ -95,24 +122,28 @@ func printUsage() {
 	usage := `intentile - Intent-first autotiling for stacking compositors
 
 Usage:
-  intentile arm <next|prev|here|ws-index>
-  intentile shape <2|3|4>
-  intentile slot <token>
-  intentile place <target> <spec>
-  intentile clear
-  intentile reset
+  intentile daemon                  Start daemon server
+  intentile arm <next|prev|here> <2|3|4>
+  intentile slot <token>            Place in slot (j/k/l/ij/il/kj/kl)
+  intentile <1-9>                   Atomic placement (auto-starts daemon)
+  intentile clear                   Clear armed state
+  intentile status                  Show daemon status
+  intentile stop                    Stop daemon
   intentile version
   intentile help
 
 Intent Grammar:
-  - Left hand: choose destination + layout (arm + shape)
-  - Right hand: choose slot placement
+  - Left hand (FN+A/S/D): arm workspace + shape
+  - Right hand (J/K/L/I): slot placement
 
 Examples:
-  intentile arm next          # Arm next workspace
-  intentile shape 3           # Set 3-column layout
-  intentile slot k            # Place in middle slot
-  intentile place next 2l     # Place in next workspace, left half
+  intentile arm next 3      # Arm next workspace, shape 3
+  intentile slot k          # Place in middle slot (shape 3)
+  intentile 5               # Atomic: next ws, shape 3, right third
+  intentile status          # Show current state
+
+Commands auto-start daemon if not running.
+Set INTENTILE_DEBUG=1 for notify-send debugging.
 `
 	fmt.Print(usage)
 }
