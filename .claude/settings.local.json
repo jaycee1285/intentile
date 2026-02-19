@@ -19,7 +19,10 @@
       "WebFetch(domain:github.com)",
       "Bash(git init:*)",
       "Bash(go mod init:*)",
-      "Bash(git reset:*)"
+      "Bash(git reset:*)",
+      "Bash(git commit:*)",
+      "Bash(./intentile version:*)",
+      "Bash(./intentile help:*)"
     ]
   }
 }
