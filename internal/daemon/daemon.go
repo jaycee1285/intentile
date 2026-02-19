@@ -122,15 +122,25 @@ func (d *Daemon) Slot(slotToken string) error {
 		d.notify(fmt.Sprintf("Overflow: %s, moving to ws:%d", reason, targetWS))
 	}
 
-	// Place in occupancy tracker
-	if err := d.occupancy.Place(targetWS, d.armedShape, slot); err != nil {
-		return err
+	// Move window to target workspace if different from current
+	if targetWS != d.currentWS {
+		if err := d.executor.SendToWorkspace(d.currentWS, targetWS, d.maxWS); err != nil {
+			d.notify(fmt.Sprintf("PLACE ERROR (workspace): %v", err))
+			return fmt.Errorf("failed to send to workspace: %w", err)
+		}
+		// Don't update currentWS - user stays on current workspace
+		// (SendToDesktop with follow=no)
 	}
 
 	// Execute window snap via compositor backend
 	if err := d.executor.SnapToSlot(d.armedShape, slot); err != nil {
-		d.notify(fmt.Sprintf("PLACE ERROR: %v", err))
+		d.notify(fmt.Sprintf("PLACE ERROR (snap): %v", err))
 		return fmt.Errorf("failed to snap window: %w", err)
+	}
+
+	// Place in occupancy tracker
+	if err := d.occupancy.Place(targetWS, d.armedShape, slot); err != nil {
+		return err
 	}
 
 	d.notify(fmt.Sprintf("PLACE ws:%d shape:%d slot:%d", targetWS, d.armedShape, slot))

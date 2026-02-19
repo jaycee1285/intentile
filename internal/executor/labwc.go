@@ -32,16 +32,77 @@ func (e *LabWCExecutor) SnapToSlot(shape, slot int) error {
 }
 
 // SendToWorkspace moves focused window to workspace
-func (e *LabWCExecutor) SendToWorkspace(workspace int) error {
-	// For now, use relative movement (next/prev)
-	// TODO: Support direct workspace targeting if LabWC supports it
-	if e.debug {
-		fmt.Fprintf(os.Stderr, "[executor] send to workspace %d (using relative movement)\n", workspace)
+func (e *LabWCExecutor) SendToWorkspace(currentWS, targetWS, maxWS int) error {
+	if currentWS == targetWS {
+		return nil // Already on target workspace
 	}
 
-	// This is a placeholder - we need to implement workspace tracking
-	// and calculate how many "next" or "prev" commands to send
-	return fmt.Errorf("SendToWorkspace not yet implemented")
+	if e.debug {
+		fmt.Fprintf(os.Stderr, "[executor] send to workspace: current=%d target=%d max=%d\n", currentWS, targetWS, maxWS)
+	}
+
+	// Calculate shortest path (forward or backward with wrapping)
+	forward := (targetWS - currentWS + maxWS) % maxWS
+	backward := (currentWS - targetWS + maxWS) % maxWS
+
+	var key string
+	var steps int
+
+	if forward <= backward {
+		key = getEnv("INTENTILE_KEY_SEND_NEXT", "super+ctrl+shift+Right")
+		steps = forward
+	} else {
+		key = getEnv("INTENTILE_KEY_SEND_PREV", "super+ctrl+shift+Left")
+		steps = backward
+	}
+
+	// Send multiple keypresses to reach target workspace
+	for i := 0; i < steps; i++ {
+		if err := e.sendKey(key); err != nil {
+			return fmt.Errorf("failed to send workspace key (step %d/%d): %w", i+1, steps, err)
+		}
+		// Small delay between keypresses to let compositor process
+		// TODO: Make this configurable
+		if steps > 1 && i < steps-1 {
+			// time.Sleep(50 * time.Millisecond) // Commented out for now, may not be needed
+		}
+	}
+
+	return nil
+}
+
+// SwitchToWorkspace switches the current view to a workspace
+func (e *LabWCExecutor) SwitchToWorkspace(currentWS, targetWS, maxWS int) error {
+	if currentWS == targetWS {
+		return nil
+	}
+
+	if e.debug {
+		fmt.Fprintf(os.Stderr, "[executor] switch to workspace: current=%d target=%d max=%d\n", currentWS, targetWS, maxWS)
+	}
+
+	// Calculate shortest path
+	forward := (targetWS - currentWS + maxWS) % maxWS
+	backward := (currentWS - targetWS + maxWS) % maxWS
+
+	var key string
+	var steps int
+
+	if forward <= backward {
+		key = getEnv("INTENTILE_KEY_WS_NEXT", "super+ctrl+Right")
+		steps = forward
+	} else {
+		key = getEnv("INTENTILE_KEY_WS_PREV", "super+ctrl+Left")
+		steps = backward
+	}
+
+	for i := 0; i < steps; i++ {
+		if err := e.sendKey(key); err != nil {
+			return fmt.Errorf("failed to switch workspace (step %d/%d): %w", i+1, steps, err)
+		}
+	}
+
+	return nil
 }
 
 // getSlotKey returns the keybind for a shape:slot combination
