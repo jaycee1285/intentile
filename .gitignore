@@ -28,8 +28,9 @@ go.work
 # Claude commits
 commits/
 
-# Documentation (only track root-level README, CLAUDE.md, and TASKBOARD)
+# Documentation (only track root-level README, CLAUDE.md, TASKBOARD, and KEYMAP)
 *.md
 !/README.md
 !/CLAUDE.md
 !/TASKBOARD.md
+!/KEYMAP.md
