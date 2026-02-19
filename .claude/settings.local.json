@@ -29,7 +29,11 @@
       "Bash(./intentile status:*)",
       "Bash(./intentile arm:*)",
       "Bash(./intentile slot:*)",
-      "Bash(./intentile:*)"
+      "Bash(./intentile:*)",
+      "Bash(wlrctl --help:*)",
+      "WebFetch(domain:git.sr.ht)",
+      "Bash(ydotool:*)",
+      "Bash(wtype:*)"
     ]
   }
 }

@@ -18,6 +18,7 @@
             gopls
             gotools
             go-tools
+            wtype
           ];
 
           shellHook = ''

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jaycee1285/intentile/internal/executor"
 	"github.com/jaycee1285/intentile/internal/occupancy"
 	"github.com/jaycee1285/intentile/internal/state"
 )
@@ -17,6 +18,7 @@ type Daemon struct {
 	mu          sync.RWMutex
 	state       *state.Manager
 	occupancy   *occupancy.Tracker
+	executor    *executor.LabWCExecutor
 	currentWS   int
 	armedWS     int
 	armedShape  int
@@ -49,6 +51,7 @@ func NewDaemon(cfg Config) *Daemon {
 	return &Daemon{
 		state:     state.NewManager(cfg.StateDir, cfg.ArmTTL, cfg.ShapeTTL),
 		occupancy: occupancy.NewTracker(),
+		executor:  executor.NewLabWCExecutor(cfg.Debug),
 		currentWS: 1,
 		maxWS:     cfg.MaxWS,
 		debug:     cfg.Debug,
@@ -124,7 +127,11 @@ func (d *Daemon) Slot(slotToken string) error {
 		return err
 	}
 
-	// TODO: Execute actual window movement via compositor backend
+	// Execute window snap via compositor backend
+	if err := d.executor.SnapToSlot(d.armedShape, slot); err != nil {
+		d.notify(fmt.Sprintf("PLACE ERROR: %v", err))
+		return fmt.Errorf("failed to snap window: %w", err)
+	}
 
 	d.notify(fmt.Sprintf("PLACE ws:%d shape:%d slot:%d", targetWS, d.armedShape, slot))
 

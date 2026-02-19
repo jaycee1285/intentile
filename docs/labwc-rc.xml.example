@@ -1,0 +1,58 @@
+<!-- intentile keybinds for LabWC rc.xml -->
+<!-- Add these to your ~/.config/labwc/rc.xml <keyboard> section -->
+
+<!-- Shape 2: Halves -->
+<keybind key="W-C-h">
+  <action name="MoveTo"><x>0</x><y>0</y></action>
+  <action name="ResizeTo"><width>50%</width><height>100%</height></action>
+</keybind>
+<keybind key="W-C-l">
+  <action name="MoveTo"><x>50%</x><y>0</y></action>
+  <action name="ResizeTo"><width>50%</width><height>100%</height></action>
+</keybind>
+
+<!-- Shape 3: Thirds -->
+<keybind key="W-C-j">
+  <action name="MoveTo"><x>0%</x><y>0</y></action>
+  <action name="ResizeTo"><width>33%</width><height>100%</height></action>
+</keybind>
+<keybind key="W-C-k">
+  <action name="MoveTo"><x>33%</x><y>0</y></action>
+  <action name="ResizeTo"><width>34%</width><height>100%</height></action>
+</keybind>
+<keybind key="W-C-semicolon">
+  <action name="MoveTo"><x>67%</x><y>0</y></action>
+  <action name="ResizeTo"><width>33%</width><height>100%</height></action>
+</keybind>
+
+<!-- Shape 4: Quarters -->
+<keybind key="W-C-u">
+  <action name="MoveTo"><x>0%</x><y>0%</y></action>
+  <action name="ResizeTo"><width>50%</width><height>50%</height></action>
+</keybind>
+<keybind key="W-C-i">
+  <action name="MoveTo"><x>50%</x><y>0%</y></action>
+  <action name="ResizeTo"><width>50%</width><height>50%</height></action>
+</keybind>
+<keybind key="W-C-o">
+  <action name="MoveTo"><x>0%</x><y>50%</y></action>
+  <action name="ResizeTo"><width>50%</width><height>50%</height></action>
+</keybind>
+<keybind key="W-C-p">
+  <action name="MoveTo"><x>50%</x><y>50%</y></action>
+  <action name="ResizeTo"><width>50%</width><height>50%</height></action>
+</keybind>
+
+<!-- Workspace switching (optional, adjust to your setup) -->
+<keybind key="W-C-Right">
+  <action name="GoToDesktop" to="right" wrap="yes" />
+</keybind>
+<keybind key="W-C-Left">
+  <action name="GoToDesktop" to="left" wrap="yes" />
+</keybind>
+<keybind key="W-C-S-Right">
+  <action name="SendToDesktop" to="right" follow="no" wrap="yes" />
+</keybind>
+<keybind key="W-C-S-Left">
+  <action name="SendToDesktop" to="left" follow="no" wrap="yes" />
+</keybind>
