@@ -257,6 +257,17 @@ func (d *Daemon) WorkspaceAdd(name string) error {
 	return d.Reconcile()
 }
 
+// WorkspaceRemoveLast removes the last (highest-index) workspace.
+func (d *Daemon) WorkspaceRemoveLast() error {
+	d.mu.Lock()
+	index := d.maxWS
+	d.mu.Unlock()
+	if index < 2 {
+		return fmt.Errorf("cannot remove last workspace")
+	}
+	return d.WorkspaceRemove(index)
+}
+
 // WorkspaceRemove removes a workspace by 1-based index and resyncs local state.
 func (d *Daemon) WorkspaceRemove(index int) error {
 	if err := d.executor.WorkspaceRemove(index); err != nil {

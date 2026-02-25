@@ -137,7 +137,7 @@ func handleWorkspace(c *client.Client) error {
 		return c.WorkspaceAdd(name)
 	case "remove", "rm", "del":
 		if len(os.Args) < 4 {
-			return fmt.Errorf("usage: intentile workspace remove <index>")
+			return c.WorkspaceRemoveLast()
 		}
 		index, err := strconv.Atoi(os.Args[3])
 		if err != nil {

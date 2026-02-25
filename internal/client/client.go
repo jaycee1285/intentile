@@ -173,6 +173,18 @@ func (c *Client) WorkspaceAdd(name string) error {
 	return nil
 }
 
+// WorkspaceRemoveLast removes the last (highest-index) workspace.
+func (c *Client) WorkspaceRemoveLast() error {
+	resp, err := c.SendCommand("WORKSPACE_REMOVE_LAST")
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(resp, "OK") {
+		return fmt.Errorf("%s", resp)
+	}
+	return nil
+}
+
 // WorkspaceRemove removes a workspace by 1-based index.
 func (c *Client) WorkspaceRemove(index int) error {
 	resp, err := c.SendCommand(fmt.Sprintf("WORKSPACE_REMOVE %d", index))

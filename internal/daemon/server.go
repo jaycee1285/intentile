@@ -186,6 +186,12 @@ func (s *Server) handleCommand(line string) string {
 		}
 		return "OK"
 
+	case "WORKSPACE_REMOVE_LAST":
+		if err := s.daemon.WorkspaceRemoveLast(); err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return "OK"
+
 	case "WORKSPACE_REMOVE":
 		if len(args) < 1 {
 			return "ERROR: usage: WORKSPACE_REMOVE <index>"
