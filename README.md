@@ -8,14 +8,14 @@ Core idea:
 - overflow policy handles "no room" without manual drag choreography
 
 Primary target:
-- LabWC (script-first MVP)
+- SartWC (labwc fork with IPC)
 
 Secondary target:
 - Wayfire adapter once intent grammar is stable
 
 ## Repo Layout
 
-- `scripts/labwc-niri`: working baseline script (copied from local config)
+- `scripts/labwc-niri`: baseline script path (labwc/sartwc rc.xml + reload helper)
 - `TASKBOARD.md`: v1/v2 execution plan
 - `docs/KEYMAP.md`: ergonomic key grammar and rc.xml mapping
 - `docs/borrowed/`: source snapshots from repos used for design
@@ -39,9 +39,12 @@ nix-env -iA nixpkgs.wtype
 # Or add to system packages
 ```
 
-### Configure LabWC
+### Configure SartWC (or LabWC baseline script)
 
-Add the keybinds from `docs/labwc-rc.xml.example` to `~/.config/labwc/rc.xml`
+Add the keybinds from `docs/labwc-rc.xml.example` to your compositor config:
+
+- SartWC: `~/.config/sartwc/rc.xml`
+- LabWC baseline script path: `~/.config/labwc/rc.xml`
 
 ## Usage
 
@@ -67,7 +70,7 @@ intentile slot k
 ```bash
 intentile 1    # Next workspace, left half
 intentile 5    # Next workspace, shape 3, right third
-intentile 9    # Next workspace, bottom-right quarter
+intentile 10   # Next workspace, bottom-right quarter
 ```
 
 ### Status and control
@@ -90,7 +93,8 @@ export INTENTILE_KEY_THIRD_MID="super+alt+k"
 ## Current Status
 
 - ✅ Socket-based daemon with occupancy tracking
-- ✅ wtype executor backend for LabWC
+- ✅ SartWC IPC executor backend
+- ✅ baseline script path for LabWC-style rc.xml workflows
 - ✅ Workspace switching (relative movement)
-- ✅ Shape-locked workspaces (v1)
-- 🚧 Testing needed in real LabWC environment
+- ✅ Side-tag occupancy collision model (6 reserved; quarters use 7-10)
+- 🚧 Testing needed across real SartWC / LabWC session variants

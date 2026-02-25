@@ -1,39 +1,30 @@
 # intentile Smoke Test - 2025-02-19
 
-## V1 MVP Complete (7 commits)
+## What Changed
 
-Full workflow implemented:
-- Socket-based daemon (5.6 MB idle)
-- wtype executor backend for LabWC
-- Workspace switching with shortest-path calculation
-- Occupancy tracking with shape-locking
-- Auto-start on first command
+Executor backend replaced: wtype keybind simulation → direct SartWC IPC.
+No more wtype dependency, rc.xml keybinds for snapping, or env var key overrides.
+Commands go straight to the compositor over a Unix socket.
 
 ---
 
 ## Prerequisites
 
-### 1. Install wtype
+### 1. SartWC running with IPC enabled
 
 ```bash
-nix-env -iA nixpkgs.wtype
-# Verify: which wtype
+# Verify socket exists
+ls $SARTWC_IPC_SOCKET 2>/dev/null || ls $XDG_RUNTIME_DIR/sartwc-$WAYLAND_DISPLAY.sock
+
+# Quick connection test
+echo "ping" | socat - UNIX:$SARTWC_IPC_SOCKET
+# Expected: OK
 ```
 
-### 2. Configure LabWC rc.xml
-
-Add keybinds from `docs/labwc-rc.xml.example` to `~/.config/labwc/rc.xml`
-
-Key sections needed:
-- Shape 2: `W-C-h`, `W-C-l` (halves)
-- Shape 3: `W-C-j`, `W-C-k`, `W-C-semicolon` (thirds)
-- Shape 4: `W-C-u`, `W-C-i`, `W-C-o`, `W-C-p` (quarters)
-- Workspace: `W-C-Right`, `W-C-Left`, `W-C-S-Right`, `W-C-S-Left`
-
-### 3. Reconfigure LabWC
+### 2. Build intentile
 
 ```bash
-labwc -r
+nix develop --command go build -o intentile .
 ```
 
 ---
@@ -42,219 +33,241 @@ labwc -r
 
 ```bash
 # Start with debug output
-INTENTILE_DEBUG=1 intentile daemon &
+INTENTILE_DEBUG=1 ./intentile daemon &
 
 # Verify running
-intentile status
+./intentile status
 # Expected: current_ws:1, armed_ws:0, occupancy:(empty)
 
 # Stop daemon
-intentile stop
+./intentile stop
 # Expected: "daemon stopped"
 
 # Verify stopped
-intentile status
+./intentile status
 # Expected: "daemon not running"
 ```
 
+**Pass/Fail:** ___
+**Notes:**
+
 ---
 
-## Test 2: Atomic Mode (Single Command)
-
-**Setup:**
-- Open a test window (e.g., `kitty` or `firefox`)
-- Note current workspace
-
-**Test:**
+## Test 2: IPC Connection
 
 ```bash
-# Auto-starts daemon if not running
-intentile 1
+# Start daemon
+INTENTILE_DEBUG=1 ./intentile daemon &
+
+# Open a test window (foot, kitty, etc.)
+
+# Try atomic placement — this exercises the full IPC path
+./intentile 1
 ```
 
 **Expected:**
-- Window moves to next workspace
-- Window snaps to left half (50% width, full height)
-- User stays on original workspace
+- Debug output shows `[executor] ipc: MoveTo x=0 y=0` and `[executor] ipc: ResizeTo width=50% height=100%`
+- No errors about socket connection
 
-**Verify:**
+**If it fails:**
+- `failed to connect to SartWC` → socket path wrong, check env vars
+- `ERROR unknown action` → compositor doesn't support the action name
+- `connection closed` → compositor dropped the connection mid-sequence
 
-```bash
-intentile status
-# Expected: occupancy shows ws2:shape=2 slots=[1]
-```
-
-**Additional atomic tests:**
-
-```bash
-# Open new window, test shape 3
-intentile 5
-# Expected: ws2, shape 3, right third
-
-# Check status
-intentile status
-# Expected: ERROR - ws2 locked to shape 2, cannot place shape 3
-# Should overflow to ws3
-
-# Open new window, test shape 4
-intentile 9
-# Expected: ws3 (or next available), bottom-right quarter
-```
+**Pass/Fail:** ___
+**Notes:**
 
 ---
 
-## Test 3: Two-Stroke Mode (Arm + Slot)
+## Test 3: Atomic Mode — The Setup Flow
+
+This is the core use case: stage a workspace from your current one.
 
 **Setup:**
-- Restart daemon: `intentile stop && INTENTILE_DEBUG=1 intentile daemon &`
-- Open test window
+- Be on workspace 1 with some windows open
+- Have at least 3 empty workspaces available
 
-**Test:**
+**Scenario: Set up a study session on ws2**
 
 ```bash
-# Arm next workspace with 3-column layout
-intentile arm next 3
+# Launch an editor, throw it to ws2 as right half
+foot &  # or whatever
+./intentile 2
+# Expected: window sent to ws2, snapped to right half (x=50%, w=50%)
+
+# Launch a reader, throw it to ws2 as left half
+foot &
+./intentile 1
+# Expected: window sent to ws2, snapped to left half (x=0, w=50%)
+
+# Check the layout
+./intentile status
+# Expected: ws2: shape=2 slots=[1,2]
+```
+
+Now switch to ws2 manually — both windows should be tiled side by side.
+
+**Pass/Fail:** ___
+**Notes:**
+
+---
+
+## Test 4: Two-Stroke Mode (Arm + Slot)
+
+```bash
+# Restart fresh
+./intentile stop
+INTENTILE_DEBUG=1 ./intentile daemon &
+
+# Open a window
+foot &
+
+# Arm next workspace with thirds
+./intentile arm next 3
 
 # Check armed state
-intentile status
+./intentile status
 # Expected: armed_ws:2, armed_shape:3
 
 # Place in middle slot
-intentile slot k
+./intentile slot k
 ```
 
 **Expected:**
-- Window moves to workspace 2
-- Window snaps to middle third (33% left, 34% width)
-- User stays on current workspace
+- Window sent to ws2, snapped to middle third (x=33%, w=34%)
 - Armed state clears after placement
+- User stays on ws1
 
 **Verify:**
 
 ```bash
-intentile status
-# Expected: armed_ws:0, armed_shape:0, occupancy shows ws2:shape=3 slots=[2]
+./intentile status
+# Expected: armed_ws:0, armed_shape:0, ws2: shape=3 slots=[2]
 ```
+
+**Pass/Fail:** ___
+**Notes:**
 
 ---
 
-## Test 4: Occupancy Tracking & Overflow
-
-**Setup:**
-- Fresh daemon
-- Workspace 1 active
-
-**Scenario:**
+## Test 5: Occupancy & Overflow
 
 ```bash
-# Place 2 windows in shape 2 (halves)
-# Window 1
-intentile 1
-# Expected: ws2, left half, occupancy=[1]
+# Fresh daemon, on ws1
 
-# Window 2
-intentile 2
-# Expected: ws2, right half, occupancy=[1,2]
+# Fill ws2 with halves
+foot &
+./intentile 1  # ws2, left half
 
-# Window 3 (workspace should be full)
-intentile 1
-# Expected: ws3, left half (overflowed to next workspace)
+foot &
+./intentile 2  # ws2, right half
+
+# ws2 is now full — next placement should overflow
+foot &
+./intentile 1  # should go to ws3, left half
 ```
 
 **Verify:**
 
 ```bash
-intentile status
+./intentile status
 # Expected:
-# ws2: shape=2 slots=[1,2]
-# ws3: shape=2 slots=[1]
+#   ws2: shape=2 slots=[1,2]
+#   ws3: shape=2 slots=[1]
 ```
+
+**Pass/Fail:** ___
+**Notes:**
 
 ---
 
-## Test 5: Shape Locking (v1 behavior)
-
-**Setup:**
-- Fresh daemon
-
-**Test:**
+## Test 6: Shape Locking
 
 ```bash
-# Lock ws2 to shape 3
-intentile 3  # Left third on ws2
+# Fresh daemon
 
-# Try to place shape 2 on same workspace
-intentile 1  # Should fail or overflow
+# Lock ws2 to thirds
+foot &
+./intentile 3  # ws2, left third
 
-# Check status
-intentile status
-# Expected: ws2 locked to shape 3, new placement on ws3
+# Try halves on same workspace — should overflow
+foot &
+./intentile 1  # should skip ws2, go to ws3
+
+./intentile status
+# Expected: ws2: shape=3, ws3: shape=2
 ```
+
+**Pass/Fail:** ___
+**Notes:**
 
 ---
 
-## Test 6: Slot Token Variations
-
-**Two-stroke with different tokens:**
+## Test 7: Quarters (Two-Stroke Slots)
 
 ```bash
-# Halves (shape 2)
-intentile arm next 2
-intentile slot j      # Left
-intentile slot l      # Right
+./intentile arm next 4
 
-# Thirds (shape 3)
-intentile arm next 3
-intentile slot j      # Left
-intentile slot k      # Middle
-intentile slot l      # Right
+./intentile slot ij   # upper-left
+# Expected: x=0, y=0, w=50%, h=50%
 
-# Quarters (shape 4) - two-stroke input
-intentile arm next 4
-intentile slot ij     # Upper-left
-intentile slot il     # Upper-right
-intentile slot kj     # Lower-left
-intentile slot kl     # Lower-right
+foot &
+./intentile arm next 4
+./intentile slot kl   # lower-right
+# Expected: x=50%, y=50%, w=50%, h=50%
 ```
+
+**Pass/Fail:** ___
+**Notes:**
 
 ---
 
-## Test 7: Environment Variable Overrides
+## Test 8: Geometry Spot-Check
 
-**Setup:**
+Use `list-views` to verify actual window geometry matches expectations.
 
 ```bash
-# Stop daemon
-intentile stop
-
-# Set custom keybind
-export INTENTILE_KEY_HALF_LEFT="super+alt+h"
-
-# Start daemon
-INTENTILE_DEBUG=1 intentile daemon &
-
-# Test
-intentile 1
-# Should send super+alt+h instead of super+ctrl+h
+echo "list-views" | socat - UNIX:$SARTWC_IPC_SOCKET
 ```
+
+Compare reported `x`, `y`, `w`, `h` against what the slot should produce.
+For a 1920x1080 output:
+
+| Slot | Expected x | Expected w | Expected h |
+|------|-----------|-----------|-----------|
+| Half left | 0 | ~960 | ~1080 |
+| Half right | ~960 | ~960 | ~1080 |
+| Third left | 0 | ~634 | ~1080 |
+| Third mid | ~634 | ~652 | ~1080 |
+| Third right | ~1286 | ~634 | ~1080 |
+| Quarter UL | 0 | ~960 | ~540 |
+| Quarter LR | ~960 | ~960 | ~540 |
+
+(Values approximate — gaps/decorations will shift things by a few px.)
+
+**Pass/Fail:** ___
+**Notes:**
 
 ---
 
 ## Common Issues
 
-**Window doesn't move:**
-- Check wtype is installed: `which wtype`
-- Verify rc.xml keybinds are configured
-- Check LabWC was reconfigured: `labwc -r`
-- Look for errors in debug output
+**`failed to connect to SartWC`:**
+- Is SartWC running (not plain labwc)?
+- Check `echo $SARTWC_IPC_SOCKET` — should be a path
+- Check `ls $XDG_RUNTIME_DIR/sartwc-*.sock`
 
-**Wrong workspace:**
-- Check current_ws tracking in status
-- Verify SendToDesktop keybinds in rc.xml
+**Window doesn't move to other workspace:**
+- Does `echo "SendToDesktop to=2 follow=no" | socat - UNIX:$SARTWC_IPC_SOCKET` work manually?
+- Check debug output for ERROR responses
 
-**Wrong geometry:**
-- Check MoveTo/ResizeTo actions in rc.xml
-- Verify percentage values (50%, 33%, etc.)
+**Window moves but wrong geometry:**
+- Does `echo "MoveTo x=0 y=0" | socat - UNIX:$SARTWC_IPC_SOCKET` work?
+- Do percentage values work? Try `echo "ResizeTo width=50% height=100%" | socat - UNIX:$SARTWC_IPC_SOCKET`
+- If percentages fail for MoveTo, we need to switch to pixel values using output dimensions
+
+**Snap happens but on wrong window:**
+- The send-then-snap order depends on the compositor still targeting the sent window for subsequent IPC commands on the same connection. If a different window gets snapped, this is a sequencing issue to investigate.
 
 **Daemon won't start:**
 - Check socket: `ls $XDG_RUNTIME_DIR/intentile.sock`
@@ -263,48 +276,32 @@ intentile 1
 
 ---
 
-## Debug Commands
-
-```bash
-# Watch daemon output
-tail -f /tmp/intentile-debug.log  # If redirected
-
-# Check wtype manually
-wtype -M super -M ctrl -k h -m ctrl -m super
-# Should snap focused window to left half
-
-# Check LabWC action manually
-# (No direct way to trigger actions, must use keybinds)
-```
-
----
-
 ## Success Criteria
 
 - [ ] Daemon starts and stops cleanly
-- [ ] Atomic mode (1-9) places windows correctly
+- [ ] IPC connection to SartWC works
+- [ ] Atomic mode (1-5, 7-10; 6 reserved) places windows on correct workspace
+- [ ] Geometry matches expected slot positions
 - [ ] Two-stroke mode (arm + slot) works
-- [ ] Workspace switching moves windows to correct workspace
-- [ ] Occupancy tracking prevents overlaps
-- [ ] Shape mismatch triggers overflow to next workspace
+- [ ] Occupancy tracking prevents double-stacking
+- [ ] Shape mismatch triggers overflow
 - [ ] Status command shows accurate state
-- [ ] Memory usage stays under 10 MB
+- [ ] Send-then-snap order works (correct window gets snapped after send)
 
 ---
 
 ## Next Steps After Smoke Test
 
 If tests pass:
-- Daily-drive test: Real workflows for 1-2 days
-- Performance check: Memory usage over time
-- Edge cases: Multiple monitors, workspace wrap-around
-- Keybind ergonomics: Validate FN+A/S/D + J/K/L/I feel right
+- Daily-drive: real workflows for 1-2 days
+- Edge cases: multiple monitors, workspace wrap-around
+- Keybind ergonomics: validate FN+A/S/D + J/K/L/I feel right
+- Performance: memory usage over time
 
 If tests fail:
-- Document failures in this file
-- Check debug output for error messages
-- Verify wtype/LabWC integration
-- Test keybinds manually to isolate issue
+- Document failures in the Notes fields above
+- Test IPC commands manually with socat to isolate compositor vs intentile issues
+- Check debug output (`INTENTILE_DEBUG=1`) for the exact command sequence
 
 ---
 

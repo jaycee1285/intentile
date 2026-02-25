@@ -7,7 +7,14 @@ STATE_ARM_WS="$STATE_DIR/arm_ws"
 STATE_ARM_TS="$STATE_DIR/arm_ts"
 STATE_SHAPE="$STATE_DIR/shape"
 STATE_SHAPE_TS="$STATE_DIR/shape_ts"
-RC_XML="${LABWC_NIRI_RC_XML:-${XDG_CONFIG_HOME:-$HOME/.config}/labwc/rc.xml}"
+default_config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+if [ -n "${LABWC_NIRI_RC_XML:-}" ]; then
+  RC_XML="$LABWC_NIRI_RC_XML"
+elif [ -f "$default_config_home/sartwc/rc.xml" ]; then
+  RC_XML="$default_config_home/sartwc/rc.xml"
+else
+  RC_XML="$default_config_home/labwc/rc.xml"
+fi
 SPAWN_DELAY="${LABWC_NIRI_SPAWN_DELAY:-0.20}"
 ARM_TTL_MS="${LABWC_NIRI_ARM_TTL_MS:-900}"
 SHAPE_TTL_MS="${LABWC_NIRI_SHAPE_TTL_MS:-1400}"
@@ -71,23 +78,33 @@ remove_last_name() {
   mv "$tmp" "$RC_XML"
 }
 
-reconfigure_labwc() {
-  if command -v labwc >/dev/null 2>&1; then
-    labwc -r >/dev/null 2>&1 || {
-      echo "labwc-niri: labwc -r failed" >&2
-      exit 1
-    }
-  else
-    echo "labwc-niri: labwc not found in PATH" >&2
+reconfigure_compositor() {
+  # Prefer sartwc if present, fallback to labwc for baseline compatibility.
+  compositor="${LABWC_NIRI_COMPOSITOR_CMD:-}"
+  if [ -z "$compositor" ]; then
+    if command -v sartwc >/dev/null 2>&1; then
+      compositor="sartwc"
+    elif command -v labwc >/dev/null 2>&1; then
+      compositor="labwc"
+    fi
+  fi
+
+  if [ -z "${compositor:-}" ]; then
+    echo "labwc-niri: neither sartwc nor labwc found in PATH" >&2
     exit 1
   fi
+
+  "$compositor" -r >/dev/null 2>&1 || {
+    echo "labwc-niri: $compositor -r failed" >&2
+    exit 1
+  }
 }
 
 maybe_reconfigure() {
   if [ "${LABWC_NIRI_SKIP_RECONFIGURE:-0}" = "1" ]; then
     return 0
   fi
-  reconfigure_labwc
+  reconfigure_compositor
 }
 
 escape_squotes() {

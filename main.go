@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/jaycee1285/intentile/internal/client"
 	"github.com/jaycee1285/intentile/internal/daemon"
@@ -39,10 +40,14 @@ func main() {
 		err = handleArm(c)
 	case "slot":
 		err = handleSlot(c)
+	case "workspace", "ws":
+		err = handleWorkspace(c)
 	case "place":
 		err = handlePlace(c)
 	case "clear":
 		err = c.Clear()
+	case "reconcile":
+		err = c.Reconcile()
 	case "status":
 		status, statusErr := c.Status()
 		if statusErr != nil {
@@ -56,8 +61,8 @@ func main() {
 			fmt.Println("daemon stopped")
 		}
 	default:
-		// Try parsing as atomic slot number (1-9)
-		if num, parseErr := strconv.Atoi(cmd); parseErr == nil && num >= 1 && num <= 9 {
+		// Try parsing as atomic slot number (1-10, skipping 6)
+		if num, parseErr := strconv.Atoi(cmd); parseErr == nil && num >= 1 && num <= 10 && num != 6 {
 			err = c.PlaceAtomic(num)
 		} else {
 			fmt.Fprintf(os.Stderr, "intentile: unknown command '%s'\n", cmd)
@@ -118,6 +123,42 @@ func handlePlace(c *client.Client) error {
 	return fmt.Errorf("place command not yet implemented")
 }
 
+func handleWorkspace(c *client.Client) error {
+	if len(os.Args) < 3 {
+		return fmt.Errorf("usage: intentile workspace <add|remove|rename> ...")
+	}
+
+	switch os.Args[2] {
+	case "add":
+		name := ""
+		if len(os.Args) > 3 {
+			name = strings.Join(os.Args[3:], " ")
+		}
+		return c.WorkspaceAdd(name)
+	case "remove", "rm", "del":
+		if len(os.Args) < 4 {
+			return fmt.Errorf("usage: intentile workspace remove <index>")
+		}
+		index, err := strconv.Atoi(os.Args[3])
+		if err != nil {
+			return fmt.Errorf("invalid workspace index '%s'", os.Args[3])
+		}
+		return c.WorkspaceRemove(index)
+	case "rename":
+		if len(os.Args) < 5 {
+			return fmt.Errorf("usage: intentile workspace rename <index> <name>")
+		}
+		index, err := strconv.Atoi(os.Args[3])
+		if err != nil {
+			return fmt.Errorf("invalid workspace index '%s'", os.Args[3])
+		}
+		name := strings.Join(os.Args[4:], " ")
+		return c.WorkspaceRename(index, name)
+	default:
+		return fmt.Errorf("unknown workspace subcommand '%s'", os.Args[2])
+	}
+}
+
 func printUsage() {
 	usage := `intentile - Intent-first autotiling for stacking compositors
 
@@ -125,7 +166,11 @@ Usage:
   intentile daemon                  Start daemon server
   intentile arm <next|prev|here> <2|3|4>
   intentile slot <token>            Place in slot (j/k/l/ij/il/kj/kl)
-  intentile <1-9>                   Atomic placement (auto-starts daemon)
+  intentile <1-5|7-10>                   Atomic placement (auto-starts daemon)
+  intentile workspace add [name]    Add workspace (live, SartWC IPC)
+  intentile workspace remove <idx>   Remove workspace by index (live)
+  intentile workspace rename <idx> <name>
+  intentile reconcile               Rebuild occupancy from compositor state
   intentile clear                   Clear armed state
   intentile status                  Show daemon status
   intentile stop                    Stop daemon
@@ -140,6 +185,10 @@ Examples:
   intentile arm next 3      # Arm next workspace, shape 3
   intentile slot k          # Place in middle slot (shape 3)
   intentile 5               # Atomic: next ws, shape 3, right third
+  intentile workspace add code
+  intentile workspace rename 4 web docs
+  intentile workspace remove 7
+  intentile reconcile       # Rebuild occupancy tracker from live windows
   intentile status          # Show current state
 
 Commands auto-start daemon if not running.

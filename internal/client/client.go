@@ -145,6 +145,58 @@ func (c *Client) PlaceAtomic(num int) error {
 	return nil
 }
 
+// Reconcile rebuilds occupancy from live compositor state
+func (c *Client) Reconcile() error {
+	resp, err := c.SendCommand("RECONCILE")
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(resp, "OK") {
+		return fmt.Errorf("%s", resp)
+	}
+	return nil
+}
+
+// WorkspaceAdd creates a workspace via the daemon (name optional).
+func (c *Client) WorkspaceAdd(name string) error {
+	cmd := "WORKSPACE_ADD"
+	if strings.TrimSpace(name) != "" {
+		cmd += " " + pctEncodeArg(name)
+	}
+	resp, err := c.SendCommand(cmd)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(resp, "OK") {
+		return fmt.Errorf("%s", resp)
+	}
+	return nil
+}
+
+// WorkspaceRemove removes a workspace by 1-based index.
+func (c *Client) WorkspaceRemove(index int) error {
+	resp, err := c.SendCommand(fmt.Sprintf("WORKSPACE_REMOVE %d", index))
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(resp, "OK") {
+		return fmt.Errorf("%s", resp)
+	}
+	return nil
+}
+
+// WorkspaceRename renames a workspace by 1-based index.
+func (c *Client) WorkspaceRename(index int, name string) error {
+	resp, err := c.SendCommand(fmt.Sprintf("WORKSPACE_RENAME %d %s", index, pctEncodeArg(name)))
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(resp, "OK") {
+		return fmt.Errorf("%s", resp)
+	}
+	return nil
+}
+
 // Clear sends clear command
 func (c *Client) Clear() error {
 	resp, err := c.SendCommand("CLEAR")
@@ -196,4 +248,23 @@ func (c *Client) Stop() error {
 	}
 
 	return fmt.Errorf("daemon did not stop cleanly: %s", resp)
+}
+
+func pctEncodeArg(s string) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') ||
+			(c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') ||
+			c == '-' || c == '_' || c == '.' || c == '~' {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String()
 }

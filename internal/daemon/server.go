@@ -166,6 +166,56 @@ func (s *Server) handleCommand(line string) string {
 		}
 		return "OK"
 
+	case "RECONCILE":
+		if err := s.daemon.Reconcile(); err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return "OK"
+
+	case "WORKSPACE_ADD":
+		name := ""
+		if len(args) >= 1 {
+			decoded, err := pctDecodeArg(args[0])
+			if err != nil {
+				return fmt.Sprintf("ERROR: invalid workspace name encoding: %v", err)
+			}
+			name = decoded
+		}
+		if err := s.daemon.WorkspaceAdd(name); err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return "OK"
+
+	case "WORKSPACE_REMOVE":
+		if len(args) < 1 {
+			return "ERROR: usage: WORKSPACE_REMOVE <index>"
+		}
+		index, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Sprintf("ERROR: invalid workspace index: %v", err)
+		}
+		if err := s.daemon.WorkspaceRemove(index); err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return "OK"
+
+	case "WORKSPACE_RENAME":
+		if len(args) < 2 {
+			return "ERROR: usage: WORKSPACE_RENAME <index> <name_pct>"
+		}
+		index, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Sprintf("ERROR: invalid workspace index: %v", err)
+		}
+		name, err := pctDecodeArg(args[1])
+		if err != nil {
+			return fmt.Sprintf("ERROR: invalid workspace name encoding: %v", err)
+		}
+		if err := s.daemon.WorkspaceRename(index, name); err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return "OK"
+
 	case "STATUS":
 		return s.getStatus()
 
@@ -218,4 +268,29 @@ func (s *Server) SocketPath() string {
 // PIDPath returns the PID file path
 func (s *Server) PIDPath() string {
 	return s.pidPath
+}
+
+func pctDecodeArg(s string) (string, error) {
+	if !strings.Contains(s, "%") {
+		return s, nil
+	}
+
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '%' {
+			b.WriteByte(s[i])
+			continue
+		}
+		if i+2 >= len(s) {
+			return "", fmt.Errorf("truncated percent escape")
+		}
+		n, err := strconv.ParseUint(s[i+1:i+3], 16, 8)
+		if err != nil {
+			return "", err
+		}
+		b.WriteByte(byte(n))
+		i += 2
+	}
+	return b.String(), nil
 }

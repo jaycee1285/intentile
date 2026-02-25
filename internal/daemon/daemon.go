@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,25 +16,25 @@ import (
 
 // Daemon manages intentile's long-running state and command processing
 type Daemon struct {
-	mu          sync.RWMutex
-	state       *state.Manager
-	occupancy   *occupancy.Tracker
-	executor    *executor.LabWCExecutor
-	currentWS   int
-	armedWS     int
-	armedShape  int
-	armedTime   time.Time
-	maxWS       int
-	debug       bool
+	mu         sync.RWMutex
+	state      *state.Manager
+	occupancy  *occupancy.Tracker
+	executor   *executor.LabWCExecutor
+	currentWS  int
+	armedWS    int
+	armedShape int
+	armedTime  time.Time
+	maxWS      int
+	debug      bool
 }
 
 // Config holds daemon configuration
 type Config struct {
-	StateDir  string
-	MaxWS     int
-	ArmTTL    time.Duration
-	ShapeTTL  time.Duration
-	Debug     bool
+	StateDir string
+	MaxWS    int
+	ArmTTL   time.Duration
+	ShapeTTL time.Duration
+	Debug    bool
 }
 
 // NewDaemon creates a daemon instance
@@ -63,9 +64,80 @@ func (d *Daemon) Start(ctx context.Context) error {
 	if err := d.state.Initialize(); err != nil {
 		return fmt.Errorf("failed to initialize state: %w", err)
 	}
+	if err := d.syncCompositorState(); err != nil {
+		d.notify(fmt.Sprintf("compositor sync failed: %v", err))
+	}
+	if err := d.Reconcile(); err != nil {
+		d.notify(fmt.Sprintf("occupancy reconcile failed: %v", err))
+	}
+
+	go d.watchCompositorEvents(ctx)
 
 	d.notify("intentile daemon started")
 	return nil
+}
+
+func (d *Daemon) syncCompositorState() error {
+	current, maxWS, err := d.executor.QueryWorkspaceState()
+	if err != nil {
+		return err
+	}
+
+	d.mu.Lock()
+	if current > 0 {
+		d.currentWS = current
+	}
+	if maxWS > 0 {
+		d.maxWS = maxWS
+	}
+	d.mu.Unlock()
+
+	if current > 0 {
+		_ = d.state.SetCurrentWS(current)
+	}
+	return nil
+}
+
+func (d *Daemon) watchCompositorEvents(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		err := d.executor.SubscribeEvents(ctx, d.handleCompositorEvent)
+		if ctx.Err() != nil {
+			return
+		}
+		d.notify(fmt.Sprintf("event stream disconnected: %v", err))
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func (d *Daemon) handleCompositorEvent(ev executor.IPCEvent) {
+	switch ev.Name {
+	case "workspace-list-changed":
+		if err := d.syncCompositorState(); err != nil {
+			d.notify(fmt.Sprintf("workspace state sync failed: %v", err))
+			return
+		}
+		if err := d.Reconcile(); err != nil {
+			d.notify(fmt.Sprintf("occupancy reconcile failed: %v", err))
+		}
+	case "workspace-changed", "focus-changed":
+		cur, err := strconv.Atoi(ev.Fields["current"])
+		if err != nil || cur < 1 {
+			return
+		}
+		d.setCurrentWorkspace(cur)
+	case "view-mapped", "view-unmapped":
+		if err := d.Reconcile(); err != nil {
+			d.notify(fmt.Sprintf("occupancy reconcile failed: %v", err))
+		}
+	}
 }
 
 // Arm sets the armed workspace and shape
@@ -118,21 +190,25 @@ func (d *Daemon) Slot(slotToken string) error {
 	canPlace, reason := d.occupancy.CanPlace(targetWS, d.armedShape, slot)
 	if !canPlace {
 		// Find next available workspace
-		targetWS = d.occupancy.FindAvailableWorkspace(targetWS, d.armedShape, d.maxWS)
+		targetWS = d.occupancy.FindAvailableWorkspace(targetWS, d.armedShape, slot, d.maxWS)
 		d.notify(fmt.Sprintf("Overflow: %s, moving to ws:%d", reason, targetWS))
 	}
+	if targetWS > d.maxWS {
+		if err := d.ensureWorkspaceExistsLocked(targetWS); err != nil {
+			d.notify(fmt.Sprintf("PLACE ERROR (workspace-create): %v", err))
+			return fmt.Errorf("failed to create workspace %d: %w", targetWS, err)
+		}
+	}
 
-	// Move window to target workspace if different from current
+	// Send window to target workspace if different from current
 	if targetWS != d.currentWS {
 		if err := d.executor.SendToWorkspace(d.currentWS, targetWS, d.maxWS); err != nil {
 			d.notify(fmt.Sprintf("PLACE ERROR (workspace): %v", err))
 			return fmt.Errorf("failed to send to workspace: %w", err)
 		}
-		// Don't update currentWS - user stays on current workspace
-		// (SendToDesktop with follow=no)
 	}
 
-	// Execute window snap via compositor backend
+	// Snap window into its slot on the target workspace
 	if err := d.executor.SnapToSlot(d.armedShape, slot); err != nil {
 		d.notify(fmt.Sprintf("PLACE ERROR (snap): %v", err))
 		return fmt.Errorf("failed to snap window: %w", err)
@@ -157,7 +233,7 @@ func (d *Daemon) PlaceAtomic(slotNum int) error {
 	// Infer shape from slot number
 	shape, slot := d.inferShapeAndSlot(slotNum)
 	if shape == 0 {
-		return fmt.Errorf("invalid slot number: %d (expected 1-9)", slotNum)
+		return fmt.Errorf("invalid slot number: %d (expected 1-5 or 7-10; 6 is reserved)", slotNum)
 	}
 
 	// Arm next workspace with inferred shape
@@ -168,6 +244,87 @@ func (d *Daemon) PlaceAtomic(slotNum int) error {
 	// Place in the slot
 	slotToken := d.slotNumberToToken(shape, slot)
 	return d.Slot(slotToken)
+}
+
+// WorkspaceAdd creates a workspace via compositor IPC and resyncs local state.
+func (d *Daemon) WorkspaceAdd(name string) error {
+	if err := d.executor.WorkspaceAdd(name); err != nil {
+		return err
+	}
+	if err := d.syncCompositorState(); err != nil {
+		return err
+	}
+	return d.Reconcile()
+}
+
+// WorkspaceRemove removes a workspace by 1-based index and resyncs local state.
+func (d *Daemon) WorkspaceRemove(index int) error {
+	if err := d.executor.WorkspaceRemove(index); err != nil {
+		return err
+	}
+	if err := d.syncCompositorState(); err != nil {
+		return err
+	}
+	return d.Reconcile()
+}
+
+// WorkspaceRename renames a workspace and resyncs local state.
+func (d *Daemon) WorkspaceRename(index int, name string) error {
+	if err := d.executor.WorkspaceRename(index, name); err != nil {
+		return err
+	}
+	if err := d.syncCompositorState(); err != nil {
+		return err
+	}
+	return d.Reconcile()
+}
+
+// Reconcile rebuilds occupancy from the compositor's current mapped/tiled views.
+func (d *Daemon) Reconcile() error {
+	snapshot, err := d.executor.QueryViewsState()
+	if err != nil {
+		return err
+	}
+
+	rebuilt := occupancy.NewTracker()
+	placed := 0
+
+	for _, view := range snapshot.Views {
+		if view.Workspace < 1 {
+			continue
+		}
+		if view.Minimized || view.Fullscreen || view.Maximized || !view.Tiled {
+			continue
+		}
+
+		shape, slot, ok := inferPlacementFromView(view)
+		if !ok {
+			continue
+		}
+
+		if err := rebuilt.Place(view.Workspace, shape, slot); err != nil {
+			if d.debug {
+				fmt.Fprintf(os.Stderr, "[intentile] reconcile skip ws:%d shape:%d slot:%d: %v\n", view.Workspace, shape, slot, err)
+			}
+			continue
+		}
+		placed++
+	}
+
+	d.mu.Lock()
+	d.occupancy = rebuilt
+	if snapshot.CurrentWorkspace > 0 {
+		d.currentWS = snapshot.CurrentWorkspace
+	}
+	d.mu.Unlock()
+
+	if snapshot.CurrentWorkspace > 0 {
+		_ = d.state.SetCurrentWS(snapshot.CurrentWorkspace)
+	}
+	if d.debug {
+		fmt.Fprintf(os.Stderr, "[intentile] reconcile: placed=%d mapped=%d\n", placed, len(snapshot.Views))
+	}
+	return nil
 }
 
 // Clear clears armed state
@@ -241,8 +398,8 @@ func (d *Daemon) inferShapeAndSlot(num int) (shape int, slot int) {
 		return 2, num
 	case num >= 3 && num <= 5:
 		return 3, num - 2
-	case num >= 6 && num <= 9:
-		return 4, num - 5
+	case num >= 7 && num <= 10:
+		return 4, num - 6
 	default:
 		return 0, 0
 	}
@@ -267,6 +424,85 @@ func (d *Daemon) slotNumberToToken(shape, slot int) string {
 		}
 	}
 	return ""
+}
+
+func (d *Daemon) ensureWorkspaceExistsLocked(targetWS int) error {
+	for d.maxWS < targetWS {
+		if err := d.executor.WorkspaceAdd(""); err != nil {
+			return err
+		}
+		d.maxWS++
+	}
+	return nil
+}
+
+func inferPlacementFromView(view executor.IPCViewState) (shape int, slot int, ok bool) {
+	if view.UsableW <= 0 || view.UsableH <= 0 || view.W <= 0 || view.H <= 0 {
+		return 0, 0, false
+	}
+
+	cx := (float64(view.X-view.UsableX) + float64(view.W)/2.0) / float64(view.UsableW)
+	cy := (float64(view.Y-view.UsableY) + float64(view.H)/2.0) / float64(view.UsableH)
+	rw := float64(view.W) / float64(view.UsableW)
+	rh := float64(view.H) / float64(view.UsableH)
+
+	if cx < -0.1 || cx > 1.1 || cy < -0.1 || cy > 1.1 {
+		return 0, 0, false
+	}
+
+	// Quarters: about half width and half height, classified by center quadrant.
+	if rw >= 0.35 && rw <= 0.65 && rh >= 0.25 && rh <= 0.65 {
+		left := cx < 0.5
+		top := cy < 0.5
+		switch {
+		case top && left:
+			return 4, 1, true
+		case top && !left:
+			return 4, 2, true
+		case !top && left:
+			return 4, 3, true
+		default:
+			return 4, 4, true
+		}
+	}
+
+	// Halves and thirds are full-height layouts.
+	if rh < 0.60 || rh > 1.10 {
+		return 0, 0, false
+	}
+
+	if rw >= 0.40 && rw <= 0.65 {
+		if cx < 0.5 {
+			return 2, 1, true
+		}
+		return 2, 2, true
+	}
+
+	if rw >= 0.20 && rw <= 0.45 {
+		switch {
+		case cx < 0.34:
+			return 3, 1, true
+		case cx > 0.66:
+			return 3, 3, true
+		default:
+			return 3, 2, true
+		}
+	}
+
+	return 0, 0, false
+}
+
+func (d *Daemon) setCurrentWorkspace(ws int) {
+	d.mu.Lock()
+	changed := d.currentWS != ws
+	d.currentWS = ws
+	d.mu.Unlock()
+
+	_ = d.state.SetCurrentWS(ws)
+
+	if changed && d.debug {
+		fmt.Fprintf(os.Stderr, "[intentile] current workspace -> %d\n", ws)
+	}
 }
 
 func (d *Daemon) notify(msg string) {
